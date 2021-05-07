@@ -46,6 +46,11 @@ where
     ) -> Result<Measurements<SPIError<SPIE, PinE>>, Error<SPIError<SPIE, PinE>>> {
         self.common.measure()
     }
+
+    /// Destructor that returns what the constructor tuck ownership of
+    pub fn release(self: Self)-> (SPI, CS, D) {
+        (self.common.interface.spi, self.common.interface.cs, self.common.delay)
+    }
 }
 
 /// Register access functions for SPI

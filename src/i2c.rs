@@ -52,6 +52,11 @@ where
     pub fn measure(&mut self) -> Result<Measurements<E>, Error<E>> {
         self.common.measure()
     }
+
+    /// Destructor that returns what the constructor tuck ownership of
+    pub fn release(self: Self)-> (I2C, D) {
+        (self.common.interface.i2c, self.common.delay)
+    }
 }
 
 /// Register access functions for I2C
