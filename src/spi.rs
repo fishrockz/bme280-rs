@@ -48,8 +48,12 @@ where
     }
 
     /// Destructor that returns what the constructor tuck ownership of
-    pub fn release(self: Self)-> (SPI, CS, D) {
-        (self.common.interface.spi, self.common.interface.cs, self.common.delay)
+    pub fn release(self: Self) -> (SPI, CS, D) {
+        (
+            self.common.interface.spi,
+            self.common.interface.cs,
+            self.common.delay,
+        )
     }
 }
 

@@ -12,6 +12,7 @@ edition = "2018"
 [dependencies]
 embedded-hal = "0.2.3"
 serde = { version = "1.0.104", optional = true, features = ["derive"] }
+bit-byte-structs = {git = 'https://gitlab.com/pointswaves/bit-byte-structures', features = ["cortex-m-debuging", ] }
 
 [dev-dependencies]
 linux-embedded-hal = "0.3.0"

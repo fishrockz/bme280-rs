@@ -63,10 +63,13 @@
 //! ```
 
 pub mod i2c;
-pub mod spi;
+//pub mod spi;
 
+use bit_byte_structs::registers::{BitByteStructError, BitStruct};
 use core::marker::PhantomData;
 use embedded_hal::blocking::delay::DelayMs;
+
+use bit_byte_structs::bus::{Interface, InterfaceError};
 
 #[cfg(feature = "serde")]
 use serde::Serialize;
@@ -137,11 +140,15 @@ macro_rules! set_bits {
 
 /// BME280 errors
 #[derive(Debug)]
-pub enum Error<E> {
+pub enum Bme280Error<E> {
     /// Failed to compensate a raw measurement
     CompensationFailed,
     /// I²C or SPI bus error
     Bus(E),
+    /// BitByte error
+    BitByte(BitByteStructError<InterfaceError<E>>),
+    /// Interface error
+    Interface(InterfaceError<E>),
     /// Failed to parse sensor data
     InvalidData,
     /// No calibration data is available (probably forgot to call or check BME280::init for failure)
@@ -150,6 +157,21 @@ pub enum Error<E> {
     UnsupportedChip,
 }
 
+impl<E> From<BitByteStructError<InterfaceError<E>>> for Bme280Error<E> {
+    fn from(err: BitByteStructError<InterfaceError<E>>) -> Self {
+        Bme280Error::BitByte(err)
+    }
+}
+impl<E> From<InterfaceError<E>> for Bme280Error<E> {
+    fn from(err: InterfaceError<E>) -> Self {
+        Bme280Error::Interface(err)
+    }
+}
+impl<E> From<E> for Bme280Error<E> {
+    fn from(err: E) -> Self {
+        Bme280Error::Bus(err)
+    }
+}
 /// BME280 operating mode
 #[derive(Debug, Copy, Clone)]
 pub enum SensorMode {
@@ -202,7 +224,7 @@ impl<E> Measurements<E> {
     fn parse(
         data: [u8; BME280_P_T_H_DATA_LEN],
         calibration: &mut CalibrationData,
-    ) -> Result<Self, Error<E>> {
+    ) -> Result<Self, Bme280Error<E>> {
         let data_msb: u32 = (data[0] as u32) << 12;
         let data_lsb: u32 = (data[1] as u32) << 4;
         let data_xlsb: u32 = (data[2] as u32) >> 4;
@@ -232,7 +254,7 @@ impl<E> Measurements<E> {
     fn compensate_temperature(
         uncompensated: u32,
         calibration: &mut CalibrationData,
-    ) -> Result<f32, Error<E>> {
+    ) -> Result<f32, Bme280Error<E>> {
         let var1: f32 = uncompensated as f32 / 16384.0 - calibration.dig_t1 as f32 / 1024.0;
         let var1 = var1 * calibration.dig_t2 as f32;
         let var2 = uncompensated as f32 / 131072.0 - calibration.dig_t1 as f32 / 8192.0;
@@ -254,7 +276,7 @@ impl<E> Measurements<E> {
     fn compensate_pressure(
         uncompensated: u32,
         calibration: &mut CalibrationData,
-    ) -> Result<f32, Error<E>> {
+    ) -> Result<f32, Bme280Error<E>> {
         let var1: f32 = calibration.t_fine as f32 / 2.0 - 64000.0;
         let var2: f32 = var1 * var1 * calibration.dig_p6 as f32 / 32768.0;
         let var2: f32 = var2 + var1 * calibration.dig_p5 as f32 * 2.0;
@@ -277,7 +299,7 @@ impl<E> Measurements<E> {
                 pressure
             }
         } else {
-            return Err(Error::InvalidData);
+            return Err(Bme280Error::InvalidData);
         };
         Ok(pressure)
     }
@@ -285,7 +307,7 @@ impl<E> Measurements<E> {
     fn compensate_humidity(
         uncompensated: u32,
         calibration: &mut CalibrationData,
-    ) -> Result<f32, Error<E>> {
+    ) -> Result<f32, Bme280Error<E>> {
         let var1: f32 = calibration.t_fine as f32 - 76800.0;
         let var2: f32 =
             calibration.dig_h4 as f32 * 64.0 + (calibration.dig_h5 as f32 / 16384.0) * var1;
@@ -307,152 +329,184 @@ impl<E> Measurements<E> {
     }
 }
 
-trait Interface {
-    type Error;
-
-    fn read_register(&mut self, register: u8) -> Result<u8, Error<Self::Error>>;
-
-    fn read_data(
-        &mut self,
-        register: u8,
-    ) -> Result<[u8; BME280_P_T_H_DATA_LEN], Error<Self::Error>>;
-
-    fn read_pt_calib_data(
-        &mut self,
-        register: u8,
-    ) -> Result<[u8; BME280_P_T_CALIB_DATA_LEN], Error<Self::Error>>;
-
-    fn read_h_calib_data(
-        &mut self,
-        register: u8,
-    ) -> Result<[u8; BME280_H_CALIB_DATA_LEN], Error<Self::Error>>;
-
-    fn write_register(&mut self, register: u8, payload: u8) -> Result<(), Error<Self::Error>>;
-}
-
 /// Common driver code for I2C and SPI interfaces
-#[derive(Debug, Default)]
-struct BME280Common<I, D> {
-    /// Interface to the chip (either I2C or SPI)
-    interface: I,
-    /// concrete Delay implementation
-    delay: D,
+//#[derive(Debug)]
+struct BME280Common<InterfaceThing: ?Sized, E> {
+    phantom: PhantomData<InterfaceThing>,
+    chip_id: BitStruct<dyn Interface<Error = InterfaceError<E>>>,
     /// calibration data
     calibration: Option<CalibrationData>,
 }
 
-impl<I, D> BME280Common<I, D>
+impl<I, E> BME280Common<I, E>
 where
     I: Interface,
-    D: DelayMs<u8>,
+    I: ?Sized,
 {
+    fn new() -> Result<Self, Bme280Error<E>> {
+        let chip_id =
+            BitStruct::<dyn Interface<Error = InterfaceError<E>>>::new(BME280_CHIP_ID_ADDR, 8, 0)?;
+        Ok(Self {
+            phantom: PhantomData,
+            chip_id,
+            calibration: None,
+        })
+    }
     /// Initializes the BME280
-    fn init(&mut self) -> Result<(), Error<I::Error>> {
-        self.verify_chip_id()?;
-        self.soft_reset()?;
-        self.calibrate()?;
-        self.configure()
+    fn init(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<(), Bme280Error<E>> {
+        self.verify_chip_id(interface)?;
+        self.soft_reset(interface, delay)?;
+        self.calibrate(interface)?;
+        self.configure(interface, delay)
     }
 
-    fn verify_chip_id(&mut self) -> Result<(), Error<I::Error>> {
-        let chip_id = self.interface.read_register(BME280_CHIP_ID_ADDR)?;
+    fn verify_chip_id(
+        &self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+    ) -> Result<(), Bme280Error<E>> {
+        let chip_id = self.chip_id.read(interface)?;
         if chip_id == BME280_CHIP_ID || chip_id == BMP280_CHIP_ID {
             Ok(())
         } else {
-            Err(Error::UnsupportedChip)
+            Err(Bme280Error::UnsupportedChip)
         }
     }
 
-    fn soft_reset(&mut self) -> Result<(), Error<I::Error>> {
-        self.interface
-            .write_register(BME280_RESET_ADDR, BME280_SOFT_RESET_CMD)?;
-        self.delay.delay_ms(2); // startup time is 2ms
+    fn soft_reset(
+        &self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<(), Bme280Error<E>> {
+        interface.write_register(BME280_RESET_ADDR, &[BME280_SOFT_RESET_CMD])?;
+        delay.delay_ms(2); // startup time is 2ms
         Ok(())
     }
 
-    fn calibrate(&mut self) -> Result<(), Error<I::Error>> {
-        let pt_calib_data = self
-            .interface
-            .read_pt_calib_data(BME280_P_T_CALIB_DATA_ADDR)?;
-        let h_calib_data = self.interface.read_h_calib_data(BME280_H_CALIB_DATA_ADDR)?;
+    fn calibrate(
+        &mut self,
+
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+    ) -> Result<(), Bme280Error<E>> {
+        let mut pt_calib_data: [u8; BME280_P_T_CALIB_DATA_LEN] = [0; BME280_P_T_CALIB_DATA_LEN];
+
+        interface.read_register(BME280_P_T_CALIB_DATA_ADDR, &mut pt_calib_data)?;
+
+        let mut h_calib_data: [u8; BME280_H_CALIB_DATA_LEN] = [0; BME280_H_CALIB_DATA_LEN];
+        interface.read_register(BME280_H_CALIB_DATA_ADDR, &mut h_calib_data)?;
+
         self.calibration = Some(parse_calib_data(&pt_calib_data, &h_calib_data));
         Ok(())
     }
 
-    fn configure(&mut self) -> Result<(), Error<I::Error>> {
-        match self.mode()? {
+    fn configure(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<(), Bme280Error<E>> {
+        match self.mode(interface)? {
             SensorMode::Sleep => {}
-            _ => self.soft_reset()?,
+            _ => self.soft_reset(interface, delay)?,
         };
 
-        self.interface.write_register(
+        interface.write_register(
             BME280_CTRL_HUM_ADDR,
-            BME280_OVERSAMPLING_1X & BME280_CTRL_HUM_MSK,
+            &[BME280_OVERSAMPLING_1X & BME280_CTRL_HUM_MSK],
         )?;
-        let ctrl_meas = self.interface.read_register(BME280_CTRL_MEAS_ADDR)?;
-        self.interface
-            .write_register(BME280_CTRL_MEAS_ADDR, ctrl_meas)?;
+        let mut ctrl_meas: [u8; 1] = [0];
+        interface.read_register(BME280_CTRL_MEAS_ADDR, &mut ctrl_meas)?;
+        interface.write_register(BME280_CTRL_MEAS_ADDR, &ctrl_meas)?;
 
-        let data = self.interface.read_register(BME280_CTRL_MEAS_ADDR)?;
-        let data = set_bits!(
-            data,
+        let mut data: [u8; 1] = [0];
+        interface.read_register(BME280_CTRL_MEAS_ADDR, &mut data)?;
+        let data = [set_bits!(
+            data[0],
             BME280_CTRL_PRESS_MSK,
             BME280_CTRL_PRESS_POS,
             BME280_OVERSAMPLING_16X
-        );
-        let data = set_bits!(
-            data,
+        )];
+        let data = [set_bits!(
+            data[0],
             BME280_CTRL_TEMP_MSK,
             BME280_CTRL_TEMP_POS,
             BME280_OVERSAMPLING_2X
-        );
-        self.interface.write_register(BME280_CTRL_MEAS_ADDR, data)?;
+        )];
+        interface.write_register(BME280_CTRL_MEAS_ADDR, &data)?;
 
-        let data = self.interface.read_register(BME280_CONFIG_ADDR)?;
-        let data = set_bits!(
-            data,
+        let mut data: [u8; 1] = [0];
+        interface.read_register(BME280_CONFIG_ADDR, &mut data)?;
+        let data = [set_bits!(
+            data[0],
             BME280_FILTER_MSK,
             BME280_FILTER_POS,
             BME280_FILTER_COEFF_16
-        );
-        self.interface.write_register(BME280_CONFIG_ADDR, data)
+        )];
+        interface.write_register(BME280_CONFIG_ADDR, &data)?;
+        Ok(())
     }
 
-    fn mode(&mut self) -> Result<SensorMode, Error<I::Error>> {
-        let data = self.interface.read_register(BME280_PWR_CTRL_ADDR)?;
-        match data & BME280_SENSOR_MODE_MSK {
+    fn mode(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+    ) -> Result<SensorMode, Bme280Error<E>> {
+        let mut data: [u8; 1] = [0];
+        interface.read_register(BME280_PWR_CTRL_ADDR, &mut data)?;
+        match data[0] & BME280_SENSOR_MODE_MSK {
             BME280_SLEEP_MODE => Ok(SensorMode::Sleep),
             BME280_FORCED_MODE => Ok(SensorMode::Forced),
             BME280_NORMAL_MODE => Ok(SensorMode::Normal),
-            _ => Err(Error::InvalidData),
+            _ => Err(Bme280Error::InvalidData),
         }
     }
 
-    fn forced(&mut self) -> Result<(), Error<I::Error>> {
-        self.set_mode(BME280_FORCED_MODE)
+    fn forced(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<(), Bme280Error<E>> {
+        self.set_mode(interface, delay, BME280_FORCED_MODE)
     }
 
-    fn set_mode(&mut self, mode: u8) -> Result<(), Error<I::Error>> {
-        match self.mode()? {
+    fn set_mode(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+        delay: &mut dyn DelayMs<u16>,
+
+        mode: u8,
+    ) -> Result<(), Bme280Error<E>> {
+        match self.mode(interface)? {
             SensorMode::Sleep => {}
-            _ => self.soft_reset()?,
+            _ => self.soft_reset(interface, delay)?,
         };
-        let data = self.interface.read_register(BME280_PWR_CTRL_ADDR)?;
-        let data = set_bits!(data, BME280_SENSOR_MODE_MSK, 0, mode);
-        self.interface.write_register(BME280_PWR_CTRL_ADDR, data)
+        let mut data: [u8; 1] = [0];
+        interface.read_register(BME280_PWR_CTRL_ADDR, &mut data)?;
+        let data = [set_bits!(data[0], BME280_SENSOR_MODE_MSK, 0, mode)];
+        interface.write_register(BME280_PWR_CTRL_ADDR, &data)?;
+        Ok(())
     }
 
     /// Captures and processes sensor data for temperature, pressure, and humidity
-    fn measure(&mut self) -> Result<Measurements<I::Error>, Error<I::Error>> {
-        self.forced()?;
-        self.delay.delay_ms(40); // await measurement
-        let measurements = self.interface.read_data(BME280_DATA_ADDR)?;
+    fn measure(
+        &mut self,
+        interface: &mut dyn Interface<Error = InterfaceError<E>>,
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<Measurements<E>, Bme280Error<E>> {
+        self.forced(interface, delay)?;
+        delay.delay_ms(40); // await measurement
+        let mut measurements: [u8; BME280_P_T_H_DATA_LEN] = [0; BME280_P_T_H_DATA_LEN];
+
+        interface.read_register(BME280_DATA_ADDR, &mut measurements)?;
         match self.calibration.as_mut() {
             Some(calibration) => {
                 let measurements = Measurements::parse(measurements, &mut *calibration)?;
                 Ok(measurements)
             }
-            None => Err(Error::NoCalibrationData),
+            None => Err(Bme280Error::NoCalibrationData),
         }
     }
 }

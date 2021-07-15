@@ -1,120 +1,77 @@
 //! BME280 driver for sensors attached via I2C.
-
 use embedded_hal::blocking::delay::DelayMs;
 use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
 
-use super::{
-    BME280Common, Error, Interface, Measurements, BME280_H_CALIB_DATA_LEN,
-    BME280_P_T_CALIB_DATA_LEN, BME280_P_T_H_DATA_LEN,
-};
+use bit_byte_structs::bus::{I2CPeripheral, InterfaceError};
+use core::marker::PhantomData;
+
+use super::{BME280Common, Bme280Error, Interface, Measurements};
+use core::fmt::{self, Debug};
 
 const BME280_I2C_ADDR_PRIMARY: u8 = 0x76;
 const BME280_I2C_ADDR_SECONDARY: u8 = 0x77;
 
 /// Representation of a BME280
-#[derive(Debug, Default)]
-pub struct BME280<I2C, D> {
-    common: BME280Common<I2CInterface<I2C>, D>,
+//#[derive(Debug)]
+pub struct BME280<I2C, E> {
+    phantom: PhantomData<I2C>,
+    phantom_e: PhantomData<E>,
+    address: u8,
+    common: BME280Common<dyn Interface<Error = InterfaceError<E>>, E>,
 }
 
-impl<I2C, D, E> BME280<I2C, D>
+impl<I2C, E> Debug for BME280<I2C, E>
+//where
+//    E: Debug
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        f.write_fmt(format_args!("BME280 at {:?}", self.address))?;
+
+        Ok(())
+    }
+}
+
+impl<I2C, E> BME280<I2C, E>
 where
     I2C: Read<Error = E> + Write<Error = E> + WriteRead<Error = E>,
-    D: DelayMs<u8>,
 {
     /// Create a new BME280 struct using the primary I²C address `0x76`
-    pub fn new_primary(i2c: I2C, delay: D) -> Self {
-        Self::new(i2c, BME280_I2C_ADDR_PRIMARY, delay)
+    pub fn new_primary() -> Result<Self, Bme280Error<E>> {
+        Self::new(BME280_I2C_ADDR_PRIMARY)
     }
 
     /// Create a new BME280 struct using the secondary I²C address `0x77`
-    pub fn new_secondary(i2c: I2C, delay: D) -> Self {
-        Self::new(i2c, BME280_I2C_ADDR_SECONDARY, delay)
+    pub fn new_secondary() -> Result<Self, Bme280Error<E>> {
+        Self::new(BME280_I2C_ADDR_SECONDARY)
     }
 
     /// Create a new BME280 struct using a custom I²C address
-    pub fn new(i2c: I2C, address: u8, delay: D) -> Self {
-        BME280 {
-            common: BME280Common {
-                interface: I2CInterface { i2c, address },
-                delay,
-                calibration: None,
-            },
-        }
+    pub fn new(address: u8) -> Result<Self, Bme280Error<E>> {
+        Ok(BME280 {
+            phantom: PhantomData,
+            phantom_e: PhantomData,
+            common: BME280Common::new()?,
+            address,
+        })
     }
 
     /// Initializes the BME280
-    pub fn init(&mut self) -> Result<(), Error<E>> {
-        self.common.init()
+    pub fn init(
+        &mut self,
+        i2c_bus: &mut I2C,
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<(), Bme280Error<E>> {
+        let mut interface = I2CPeripheral::<I2C, E>::new(i2c_bus, self.address);
+        self.common.init(&mut interface, delay)
     }
 
     /// Captures and processes sensor data for temperature, pressure, and humidity
-    pub fn measure(&mut self) -> Result<Measurements<E>, Error<E>> {
-        self.common.measure()
-    }
-
-    /// Destructor that returns what the constructor tuck ownership of
-    pub fn release(self: Self)-> (I2C, D) {
-        (self.common.interface.i2c, self.common.delay)
-    }
-}
-
-/// Register access functions for I2C
-#[derive(Debug, Default)]
-struct I2CInterface<I2C> {
-    /// concrete I²C device implementation
-    i2c: I2C,
-    /// I²C device address
-    address: u8,
-}
-
-impl<I2C, E> Interface for I2CInterface<I2C>
-where
-    I2C: Read<Error = E> + Write<Error = E> + WriteRead<Error = E>,
-{
-    type Error = E;
-
-    fn read_register(&mut self, register: u8) -> Result<u8, Error<E>> {
-        let mut data: [u8; 1] = [0];
-        self.i2c
-            .write_read(self.address, &[register], &mut data)
-            .map_err(Error::Bus)?;
-        Ok(data[0])
-    }
-
-    fn read_data(&mut self, register: u8) -> Result<[u8; BME280_P_T_H_DATA_LEN], Error<E>> {
-        let mut data: [u8; BME280_P_T_H_DATA_LEN] = [0; BME280_P_T_H_DATA_LEN];
-        self.i2c
-            .write_read(self.address, &[register], &mut data)
-            .map_err(Error::Bus)?;
-        Ok(data)
-    }
-
-    fn read_pt_calib_data(
+    pub fn measure(
         &mut self,
-        register: u8,
-    ) -> Result<[u8; BME280_P_T_CALIB_DATA_LEN], Error<E>> {
-        let mut data: [u8; BME280_P_T_CALIB_DATA_LEN] = [0; BME280_P_T_CALIB_DATA_LEN];
-        self.i2c
-            .write_read(self.address, &[register], &mut data)
-            .map_err(Error::Bus)?;
-        Ok(data)
-    }
-
-    fn read_h_calib_data(
-        &mut self,
-        register: u8,
-    ) -> Result<[u8; BME280_H_CALIB_DATA_LEN], Error<E>> {
-        let mut data: [u8; BME280_H_CALIB_DATA_LEN] = [0; BME280_H_CALIB_DATA_LEN];
-        self.i2c
-            .write_read(self.address, &[register], &mut data)
-            .map_err(Error::Bus)?;
-        Ok(data)
-    }
-
-    fn write_register(&mut self, register: u8, payload: u8) -> Result<(), Error<E>> {
-        self.i2c
-            .write(self.address, &[register, payload])
-            .map_err(Error::Bus)
+        i2c_bus: &mut I2C,
+        delay: &mut dyn DelayMs<u16>,
+    ) -> Result<Measurements<E>, Bme280Error<E>> {
+        let mut interface = I2CPeripheral::<I2C, E>::new(i2c_bus, self.address);
+        self.common.measure(&mut interface, delay)
     }
 }
