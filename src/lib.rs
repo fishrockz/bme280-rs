@@ -63,7 +63,7 @@
 //! ```
 
 pub mod i2c;
-//pub mod spi;
+pub mod spi;
 
 use bit_byte_structs::registers::{BitByteStructError, BitStruct};
 use core::marker::PhantomData;
